@@ -287,7 +287,7 @@ impl StorageEngine {
                     let tombstone = serde_json::json!({
                         "_id": doc_id,
                         "_collection": collection,
-                        "_deleted": true
+                        "_tombstone": true
                     });
                     let tombstone_json = serde_json::to_string(&tombstone)
                         .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
@@ -332,7 +332,7 @@ impl StorageEngine {
                             let tombstone = serde_json::json!({
                                 "_id": doc_id,
                                 "_collection": collection,
-                                "_deleted": true
+                                "_tombstone": true
                             });
                             let tombstone_json = serde_json::to_string(&tombstone)
                                 .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;

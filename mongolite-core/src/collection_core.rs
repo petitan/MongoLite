@@ -121,58 +121,9 @@ impl CollectionCore {
         // Fall back to full collection scan
         drop(indexes); // Release read lock before write lock
 
-        let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
-
-        // Use HashMap to track latest version of each document by _id
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-
-        // Read from data_offset to EOF (reads ALL collections' documents)
-        let file_len = storage.file_len()?;
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // ✅ FILTER: Only include documents from THIS collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
-                    }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
-                }
-                Err(_) => {
-                    break; // End of data
-                }
-            }
-        }
-
-        // Now filter by query and exclude tombstones
-        let mut matching_docs = Vec::new();
-        for (_, doc) in docs_by_id {
-            // Skip tombstones (deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                continue;
-            }
-
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
-
-            if parsed_query.matches(&document) {
-                matching_docs.push(doc);
-            }
-        }
+        // Scan all documents and filter by query (helper handles locks internally)
+        let docs_by_id = self.scan_documents()?;
+        let matching_docs = self.filter_documents(docs_by_id, &parsed_query)?;
 
         Ok(matching_docs)
     }
@@ -1119,5 +1070,67 @@ impl CollectionCore {
         } else {
             Ok(0)
         }
+    }
+
+    // ========== PRIVATE HELPER METHODS ==========
+
+    /// Scan all documents in this collection and return latest version by _id
+    /// This helper reduces code duplication across find(), update(), delete(), etc.
+    fn scan_documents(&self) -> Result<HashMap<String, Value>> {
+        let mut storage = self.storage.write();
+        let meta = storage.get_collection_meta(&self.name)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+
+        let file_len = storage.file_len()?;
+        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
+        let mut current_offset = meta.data_offset;
+
+        while current_offset < file_len {
+            match storage.read_data(current_offset) {
+                Ok(doc_bytes) => {
+                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
+
+                    // Filter by collection
+                    let doc_collection = doc.get("_collection")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    if doc_collection == self.name {
+                        if let Some(id_value) = doc.get("_id") {
+                            let id_key = serde_json::to_string(id_value)
+                                .unwrap_or_else(|_| "unknown".to_string());
+                            docs_by_id.insert(id_key, doc);
+                        }
+                    }
+                    current_offset += 4 + doc_bytes.len() as u64;
+                }
+                Err(_) => break,
+            }
+        }
+
+        Ok(docs_by_id)
+    }
+
+    /// Filter documents by query and exclude tombstones
+    /// Returns only live documents matching the query
+    fn filter_documents(&self, docs_by_id: HashMap<String, Value>, query: &Query) -> Result<Vec<Value>> {
+        let mut results = Vec::new();
+
+        for (_, doc) in docs_by_id {
+            // Skip tombstones
+            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                continue;
+            }
+
+            // Convert to Document and check query
+            let doc_json_str = serde_json::to_string(&doc)?;
+            let document = Document::from_json(&doc_json_str)?;
+
+            if query.matches(&document) {
+                results.push(doc);
+            }
+        }
+
+        Ok(results)
     }
 }

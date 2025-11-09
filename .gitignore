@@ -1,0 +1,37 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Database files
+*.db
+*.mlite
+
+# Debug files
+debug_*.py
+test_*.db
+test_*.mlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Zone Identifier (Windows)
+*:Zone.Identifier
+
+# Test outputs
+examples/data/*.db
+examples/data/*.mlite
+mongolite-core/*.mlite
