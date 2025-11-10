@@ -35,7 +35,7 @@ jobs:
           pip install --find-links=target/wheels ironbase
 
       - name: Test import
-        run: python -c "import ironbase; print('✓ Import successful')"
+        run: python -c "import ironbase; print('Import successful')"
 
       - name: Run Rust tests
         run: cargo test --workspace --verbose
