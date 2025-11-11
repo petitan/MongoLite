@@ -245,6 +245,34 @@ impl StorageEngine {
             self.wal.append(&op_entry)?;
         }
 
+        // Step 2.5: Write index changes to WAL (for two-phase commit recovery)
+        // Each index change is written as an IndexChange entry
+        // Format: {index_name: string, operation: Insert|Delete, key: IndexKey, doc_id: DocumentId}
+        for (index_name, changes) in transaction.index_changes() {
+            for change in changes {
+                // Serialize index change to JSON
+                let change_data = serde_json::json!({
+                    "index_name": index_name,
+                    "operation": match change.operation {
+                        crate::transaction::IndexOperation::Insert => "Insert",
+                        crate::transaction::IndexOperation::Delete => "Delete",
+                    },
+                    "key": change.key,
+                    "doc_id": change.doc_id,
+                });
+
+                let change_json = serde_json::to_string(&change_data)
+                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+
+                let index_entry = WALEntry::new(
+                    transaction.id,
+                    WALEntryType::IndexChange,
+                    change_json.as_bytes().to_vec()
+                );
+                self.wal.append(&index_entry)?;
+            }
+        }
+
         // Step 3: Write COMMIT marker to WAL
         let commit_entry = WALEntry::new(transaction.id, WALEntryType::Commit, vec![]);
         self.wal.append(&commit_entry)?;
@@ -255,13 +283,28 @@ impl StorageEngine {
         // Step 5: Apply operations to storage
         self.apply_operations(transaction)?;
 
-        // Step 6: Apply index changes
-        // NOTE: Index changes are tracked in transaction.index_changes()
-        // The actual index updates happen at a higher level (CollectionCore)
-        // where the IndexManager is accessible. This maintains clean separation
-        // of concerns: StorageEngine handles data persistence, CollectionCore
-        // handles index management.
-        // For full ACD guarantee, index updates must be applied before Step 8 (fsync)
+        // Step 6: Two-Phase Commit for Index Changes
+        // NOTE: Index changes are written to WAL in Step 2.5 above.
+        // The actual two-phase commit for indexes happens at a higher level:
+        //
+        // DESIGN: Index atomicity requires coordination between:
+        // - StorageEngine (this layer): Writes index changes to WAL
+        // - CollectionCore/Database layer: Executes two-phase commit
+        //
+        // TWO-PHASE COMMIT PROTOCOL (implemented in Steps 4-6):
+        // Phase 1 (PREPARE): Create temp index files (.idx.tmp)
+        //   - For each index: index.prepare_changes(base_path) → temp_path
+        //   - WAL write (Step 2.5) makes changes durable
+        //
+        // Phase 2 (COMMIT): Atomic rename temp → final
+        //   - For each temp: BPlusTree::commit_prepared_changes(temp_path, final_path)
+        //   - POSIX rename() guarantees atomicity
+        //
+        // CRASH RECOVERY (implemented in Step 4):
+        // - WAL recovery replays IndexChange entries
+        // - Detects uncommitted temp files and cleans up
+        //
+        // TODO (Steps 4-6): Implement full two-phase commit at Database/CollectionCore level
 
         // Step 7: Apply metadata changes
         for metadata_change in transaction.metadata_changes() {
