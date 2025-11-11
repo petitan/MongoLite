@@ -32,6 +32,8 @@ pub struct Header {
     pub page_size: u32,            // Oldal méret (default: 4KB)
     pub collection_count: u32,     // Collection-ök száma
     pub free_list_head: u64,       // Szabad blokkok lista kezdete
+    #[serde(default)]
+    pub index_section_offset: u64, // Index metadata section offset (0 = none)
 }
 
 impl Default for Header {
@@ -42,6 +44,7 @@ impl Default for Header {
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
+            index_section_offset: 0,
         }
     }
 }

@@ -54,6 +54,7 @@ impl BPlusTreeFull {
                 sparse: false,
                 num_keys: 0,
                 tree_height: 1,
+                root_offset: 0,
             },
         }
     }
