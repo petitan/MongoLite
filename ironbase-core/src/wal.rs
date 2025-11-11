@@ -256,7 +256,7 @@ impl WriteAheadLog {
     pub fn clear(&mut self) -> Result<()> {
         self.file.set_len(0)?;
         self.file.seek(SeekFrom::Start(0))?;
-        self.flush()?;
+        self.file.sync_all()?;  // Ensure truncation is persisted to disk
         Ok(())
     }
 

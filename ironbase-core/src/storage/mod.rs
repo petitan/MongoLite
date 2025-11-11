@@ -928,8 +928,9 @@ mod tests {
 
         // Reopen storage - should recover from WAL
         {
-            let _storage = StorageEngine::open(&db_path).unwrap();
-            // Recovery happens automatically in open()
+            let mut storage = StorageEngine::open(&db_path).unwrap();
+            // Explicitly call recovery (DatabaseCore does this automatically)
+            storage.recover_from_wal().unwrap();
 
             // WAL should be cleared after recovery
             let mut wal_result = WriteAheadLog::open(&wal_path).unwrap();
