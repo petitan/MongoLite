@@ -11,6 +11,17 @@ use crate::collection_core::CollectionCore;
 use crate::error::Result;
 use crate::transaction::{Transaction, TransactionId};
 
+/// Convert transaction::IndexKey to index::IndexKey
+fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
+    match tx_key {
+        crate::transaction::IndexKey::Int(i) => crate::index::IndexKey::Int(*i),
+        crate::transaction::IndexKey::String(s) => crate::index::IndexKey::String(s.clone()),
+        crate::transaction::IndexKey::Float(f) => crate::index::IndexKey::Float(crate::index::OrderedFloat(f.value())),
+        crate::transaction::IndexKey::Bool(b) => crate::index::IndexKey::Bool(*b),
+        crate::transaction::IndexKey::Null => crate::index::IndexKey::Null,
+    }
+}
+
 /// Pure Rust MongoLite Database - language-independent
 pub struct DatabaseCore {
     storage: Arc<RwLock<StorageEngine>>,
@@ -23,14 +34,57 @@ impl DatabaseCore {
     /// Open or create database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
-        let storage = StorageEngine::open(&path_str)?;
+        let mut storage = StorageEngine::open(&path_str)?;
 
-        Ok(DatabaseCore {
+        // Recover from WAL (includes both data and index changes)
+        let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
+
+        // Create DatabaseCore instance
+        let db = DatabaseCore {
             storage: Arc::new(RwLock::new(storage)),
             db_path: path_str,
             next_tx_id: AtomicU64::new(1),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        })
+        };
+
+        // Apply recovered index changes to collections
+        // Group index changes by collection name
+        use std::collections::HashMap;
+        let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> = HashMap::new();
+
+        for change in recovered_index_changes {
+            // Group by collection name (now properly included in RecoveredIndexChange)
+            changes_by_collection
+                .entry(change.collection.clone())
+                .or_insert_with(Vec::new)
+                .push(change);
+        }
+
+        // Apply changes to each collection's indexes
+        for (collection_name, changes) in changes_by_collection {
+            // Get collection (creates if doesn't exist)
+            if let Ok(collection) = db.collection(&collection_name) {
+                for change in changes {
+                    // Apply the index change to the collection's indexes
+                    let mut indexes = collection.indexes.write();
+                    if let Some(btree_index) = indexes.get_btree_index_mut(&change.index_name) {
+                        // Convert transaction::IndexKey to index::IndexKey
+                        let index_key = convert_index_key(&change.key);
+
+                        match change.operation {
+                            crate::transaction::IndexOperation::Insert => {
+                                btree_index.insert(index_key, change.doc_id)?;
+                            }
+                            crate::transaction::IndexOperation::Delete => {
+                                btree_index.delete(&index_key, &change.doc_id)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(db)
     }
 
     /// Get collection (creates if doesn't exist)

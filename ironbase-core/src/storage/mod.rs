@@ -20,6 +20,7 @@ pub use compaction::CompactionStats;
 /// Recovered index change from WAL (for higher-level replay)
 #[derive(Debug, Clone)]
 pub struct RecoveredIndexChange {
+    pub collection: String,
     pub index_name: String,
     pub operation: crate::transaction::IndexOperation,
     pub key: crate::transaction::IndexKey,
@@ -130,7 +131,7 @@ impl StorageEngine {
         let wal_path = PathBuf::from(&path_str).with_extension("wal");
         let wal = WriteAheadLog::open(wal_path)?;
 
-        let mut storage = StorageEngine {
+        let storage = StorageEngine {
             file,
             mmap,
             header,
@@ -139,8 +140,8 @@ impl StorageEngine {
             wal,
         };
 
-        // Recover from WAL if needed
-        storage.recover_from_wal()?;
+        // NOTE: WAL recovery is now handled by DatabaseCore::open() for index atomicity
+        // This allows Database to coordinate index recovery across all collections
 
         Ok(storage)
     }
@@ -256,11 +257,21 @@ impl StorageEngine {
 
         // Step 2.5: Write index changes to WAL (for two-phase commit recovery)
         // Each index change is written as an IndexChange entry
-        // Format: {index_name: string, operation: Insert|Delete, key: IndexKey, doc_id: DocumentId}
+        // Format: {collection: string, index_name: string, operation: Insert|Delete, key: IndexKey, doc_id: DocumentId}
+        // Extract collection name from first operation (all operations in a transaction are for the same collection)
+        let collection_name = transaction.operations()
+            .first()
+            .map(|op| match op {
+                crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
+                crate::transaction::Operation::Update { collection, .. } => collection.clone(),
+                crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
+            });
+
         for (index_name, changes) in transaction.index_changes() {
             for change in changes {
-                // Serialize index change to JSON
+                // Serialize index change to JSON (now includes collection name)
                 let change_data = serde_json::json!({
+                    "collection": collection_name.as_ref().unwrap_or(&"unknown".to_string()),
                     "index_name": index_name,
                     "operation": match change.operation {
                         crate::transaction::IndexOperation::Insert => "Insert",
@@ -437,7 +448,12 @@ impl StorageEngine {
                             .map_err(|e| MongoLiteError::Serialization(format!("UTF-8 error: {}", e)))?;
                         let change_json: serde_json::Value = serde_json::from_str(change_str)?;
 
-                        // Extract fields
+                        // Extract fields (including collection name added in Step 6)
+                        let collection = change_json["collection"]
+                            .as_str()
+                            .ok_or_else(|| MongoLiteError::Serialization("Missing collection".to_string()))?
+                            .to_string();
+
                         let index_name = change_json["index_name"]
                             .as_str()
                             .ok_or_else(|| MongoLiteError::Serialization("Missing index_name".to_string()))?
@@ -453,6 +469,7 @@ impl StorageEngine {
                         let doc_id: crate::document::DocumentId = serde_json::from_value(change_json["doc_id"].clone())?;
 
                         all_index_changes.push(RecoveredIndexChange {
+                            collection,
                             index_name,
                             operation,
                             key,

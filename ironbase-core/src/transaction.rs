@@ -75,6 +75,13 @@ pub enum IndexKey {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OrderedFloat(f64);
 
+impl OrderedFloat {
+    /// Get the inner f64 value
+    pub fn value(&self) -> f64 {
+        self.0
+    }
+}
+
 impl PartialEq for OrderedFloat {
     fn eq(&self, other: &Self) -> bool {
         self.0.to_bits() == other.0.to_bits()

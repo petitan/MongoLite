@@ -225,6 +225,25 @@ impl BPlusTree {
         Ok(())
     }
 
+    /// Delete key-document pair from index
+    pub fn delete(&mut self, key: &IndexKey, doc_id: &DocumentId) -> Result<()> {
+        // For now, simplified delete from leaf
+        // Full implementation would handle merges and internal nodes
+        if let BTreeNode::Leaf(ref mut leaf) = *self.root {
+            // Find the key position
+            if let Ok(pos) = leaf.keys.binary_search(key) {
+                // Verify this is the correct document ID
+                if &leaf.document_ids[pos] == doc_id {
+                    leaf.keys.remove(pos);
+                    leaf.document_ids.remove(pos);
+                    self.metadata.num_keys -= 1;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Find child index for key in internal node
     fn find_child_index(&self, keys: &[IndexKey], key: &IndexKey) -> usize {
         keys.binary_search(key).unwrap_or_else(|pos| pos)
