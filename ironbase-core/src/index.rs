@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write, Seek, SeekFrom};
 use std::fs::File;
+use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
 use crate::document::DocumentId;
 use crate::error::{Result, MongoLiteError};
@@ -395,6 +396,64 @@ impl BPlusTree {
             metadata,
         })
     }
+
+    /// Two-Phase Commit: Phase 1 - Prepare changes to a temporary file
+    /// Creates a .tmp file with the current index state
+    /// Returns the path to the temporary file
+    pub fn prepare_changes(&mut self, base_path: &PathBuf) -> Result<PathBuf> {
+        use std::fs::OpenOptions;
+
+        // Create temp file path: {base_path}.tmp
+        let temp_path = base_path.with_extension("idx.tmp");
+
+        // Open/create temp file (truncate if exists)
+        let mut temp_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temp_path)
+            .map_err(|e| MongoLiteError::Io(e))?;
+
+        // Save current tree state to temp file
+        self.save_to_file(&mut temp_file)?;
+
+        // Ensure data is written to disk
+        temp_file.sync_all()
+            .map_err(|e| MongoLiteError::Io(e))?;
+
+        Ok(temp_path)
+    }
+
+    /// Two-Phase Commit: Phase 2 - Commit prepared changes atomically
+    /// Performs atomic rename from temp file to final file
+    /// If final_path doesn't exist yet, creates parent directories
+    pub fn commit_prepared_changes(temp_path: &PathBuf, final_path: &PathBuf) -> Result<()> {
+        use std::fs;
+
+        // Ensure parent directory exists
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| MongoLiteError::Io(e))?;
+        }
+
+        // Atomic rename: temp → final
+        fs::rename(temp_path, final_path)
+            .map_err(|e| MongoLiteError::Io(e))?;
+
+        Ok(())
+    }
+
+    /// Rollback prepared changes by deleting the temp file
+    pub fn rollback_prepared_changes(temp_path: &PathBuf) -> Result<()> {
+        use std::fs;
+
+        if temp_path.exists() {
+            fs::remove_file(temp_path)
+                .map_err(|e| MongoLiteError::Io(e))?;
+        }
+
+        Ok(())
+    }
 }
 
 // ===== Legacy HashMap-based Index (for compatibility) =====
@@ -467,6 +526,8 @@ impl Index {
 pub struct IndexManager {
     btree_indexes: HashMap<String, BPlusTree>,
     legacy_indexes: HashMap<String, Index>,
+    /// File paths for persistent indexes (for two-phase commit)
+    index_file_paths: HashMap<String, PathBuf>,
 }
 
 impl IndexManager {
@@ -474,7 +535,18 @@ impl IndexManager {
         IndexManager {
             btree_indexes: HashMap::new(),
             legacy_indexes: HashMap::new(),
+            index_file_paths: HashMap::new(),
         }
+    }
+
+    /// Set file path for an index (required for two-phase commit)
+    pub fn set_index_path(&mut self, index_name: &str, path: PathBuf) {
+        self.index_file_paths.insert(index_name.to_string(), path);
+    }
+
+    /// Get file path for an index
+    pub fn get_index_path(&self, index_name: &str) -> Option<&PathBuf> {
+        self.index_file_paths.get(index_name)
     }
 
     /// Create B+ tree index
@@ -511,6 +583,8 @@ impl IndexManager {
                 format!("Index not found: {}", name)
             ));
         }
+        // Also remove file path if it exists
+        self.index_file_paths.remove(name);
         Ok(())
     }
 
