@@ -5,11 +5,14 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
 
 use crate::storage::StorageEngine;
 use crate::collection_core::CollectionCore;
 use crate::error::Result;
 use crate::transaction::{Transaction, TransactionId};
+use crate::document::DocumentId;
+use serde_json::Value;
 
 /// Convert transaction::IndexKey to index::IndexKey
 fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
@@ -359,6 +362,58 @@ impl DatabaseCore {
             ))?;
 
         f(transaction)
+    }
+
+    // ========== Transaction Convenience Methods ==========
+
+    /// Insert one document within a transaction (convenience method)
+    ///
+    /// This is a helper that combines collection lookup and transaction execution.
+    /// Equivalent to: db.collection(name).insert_one_tx(doc, tx)
+    pub fn insert_one_tx(
+        &self,
+        collection_name: &str,
+        document: HashMap<String, Value>,
+        tx_id: TransactionId
+    ) -> Result<DocumentId> {
+        let collection = self.collection(collection_name)?;
+
+        self.with_transaction(tx_id, |transaction| {
+            collection.insert_one_tx(document, transaction)
+        })
+    }
+
+    /// Update one document within a transaction (convenience method)
+    ///
+    /// Returns (matched_count, modified_count)
+    pub fn update_one_tx(
+        &self,
+        collection_name: &str,
+        query: &Value,
+        update: Value,
+        tx_id: TransactionId
+    ) -> Result<(u64, u64)> {
+        let collection = self.collection(collection_name)?;
+
+        self.with_transaction(tx_id, |transaction| {
+            collection.update_one_tx(query, update, transaction)
+        })
+    }
+
+    /// Delete one document within a transaction (convenience method)
+    ///
+    /// Returns deleted_count
+    pub fn delete_one_tx(
+        &self,
+        collection_name: &str,
+        query: &Value,
+        tx_id: TransactionId
+    ) -> Result<u64> {
+        let collection = self.collection(collection_name)?;
+
+        self.with_transaction(tx_id, |transaction| {
+            collection.delete_one_tx(query, transaction)
+        })
     }
 
     // ========== Two-Phase Commit Helper Methods ==========

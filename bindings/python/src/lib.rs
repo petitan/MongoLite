@@ -117,10 +117,6 @@ impl IronBase {
     ///     db.insert_one_tx("users", {"name": "Alice"}, tx_id)
     ///     db.commit_transaction(tx_id)
     fn insert_one_tx(&self, collection_name: String, document: &PyDict, tx_id: u64) -> PyResult<PyObject> {
-        // Get collection
-        let collection = self.db.collection(&collection_name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-
         // Convert Python dict to HashMap
         let mut doc_map: HashMap<String, Value> = HashMap::new();
         for (key, value) in document.iter() {
@@ -129,11 +125,9 @@ impl IronBase {
             doc_map.insert(key_str, json_value);
         }
 
-        // Call Rust method with transaction
-        let inserted_id = self.db.with_transaction(tx_id, |transaction| {
-            collection.insert_one_tx(doc_map, transaction)
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        // Call Rust core (ALL logic in core)
+        let inserted_id = self.db.insert_one_tx(&collection_name, doc_map, tx_id)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Return result
         Python::with_gil(|py| {
@@ -167,19 +161,13 @@ impl IronBase {
     ///     db.update_one_tx("users", {"name": "Alice"}, {"name": "Alice", "age": 30}, tx_id)
     ///     db.commit_transaction(tx_id)
     fn update_one_tx(&self, collection_name: String, query: &PyDict, new_doc: &PyDict, tx_id: u64) -> PyResult<PyObject> {
-        // Get collection
-        let collection = self.db.collection(&collection_name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-
         // Convert Python dicts to JSON
         let query_json = python_dict_to_json_value(query)?;
         let new_doc_json = python_dict_to_json_value(new_doc)?;
 
-        // Call Rust method with transaction
-        let (matched_count, modified_count) = self.db.with_transaction(tx_id, |transaction| {
-            collection.update_one_tx(&query_json, new_doc_json, transaction)
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        // Call Rust core (ALL logic in core)
+        let (matched_count, modified_count) = self.db.update_one_tx(&collection_name, &query_json, new_doc_json, tx_id)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Return result
         Python::with_gil(|py| {
@@ -206,18 +194,12 @@ impl IronBase {
     ///     db.delete_one_tx("users", {"name": "Alice"}, tx_id)
     ///     db.commit_transaction(tx_id)
     fn delete_one_tx(&self, collection_name: String, query: &PyDict, tx_id: u64) -> PyResult<PyObject> {
-        // Get collection
-        let collection = self.db.collection(&collection_name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-
         // Convert Python dict to JSON
         let query_json = python_dict_to_json_value(query)?;
 
-        // Call Rust method with transaction
-        let deleted_count = self.db.with_transaction(tx_id, |transaction| {
-            collection.delete_one_tx(&query_json, transaction)
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        // Call Rust core (ALL logic in core)
+        let deleted_count = self.db.delete_one_tx(&collection_name, &query_json, tx_id)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Return result
         Python::with_gil(|py| {
