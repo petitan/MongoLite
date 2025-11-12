@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Query test_chunks.mlite database - Interactive demo
+Query chunks_database.mlite - Interactive demo showcasing all query features
 """
-import ironbase
+from ironbase import IronBase
 
 def main():
     print("=" * 60)
@@ -10,14 +10,14 @@ def main():
     print("=" * 60)
 
     # Open database
-    db = ironbase.IronBase("test_chunks.mlite")
+    db = IronBase("chunks_database.mlite")
     chunks = db.collection("chunks")
 
     # Stats
     print(f"\n📊 Database Stats:")
-    print(f"   Total chunks: {chunks.count_documents({})}")
+    print(f"   Total chunks: {chunks.count_documents()}")
 
-    # Get unique files_ids
+    # Get unique files_ids using distinct()
     files_ids = chunks.distinct("files_id")
     print(f"   Unique files: {len(files_ids)}")
 
@@ -36,7 +36,7 @@ def main():
     if first_chunk:
         print(f"      File ID: {first_chunk.get('files_id')}")
         print(f"      Chunk #: {first_chunk.get('n')}")
-        print(f"      Data length: {len(first_chunk.get('data', ''))} chars")
+        print(f"      Data length: {len(first_chunk.get('data', ''))} bytes")
 
     # 2. Count chunks per file
     print("\n   2. Chunks per file:")
@@ -65,6 +65,12 @@ def main():
     results = chunks.aggregate(pipeline)
     for result in results:
         print(f"      {result['_id']}: {result['chunk_count']} chunks")
+
+    # 5. Projection - select specific fields only
+    print(f"\n   5. Projection - first 3 chunks with only _id and n fields:")
+    projected = chunks.find({}, projection={"_id": 1, "n": 1}, limit=3)
+    for chunk in projected:
+        print(f"      {chunk}")
 
     # Close
     db.close()

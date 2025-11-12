@@ -15,7 +15,7 @@ use crate::wal::WriteAheadLog;
 use crate::transaction::Transaction;
 
 // Re-export compaction types
-pub use compaction::CompactionStats;
+pub use compaction::{CompactionStats, CompactionConfig};
 
 /// Recovered index change from WAL (for higher-level replay)
 #[derive(Debug, Clone)]

@@ -8,6 +8,21 @@ use serde_json::Value;
 use crate::error::{Result};
 use super::StorageEngine;
 
+/// Compaction configuration
+#[derive(Debug, Clone)]
+pub struct CompactionConfig {
+    /// Number of documents to process in memory at once (default: 1000)
+    pub chunk_size: usize,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        CompactionConfig {
+            chunk_size: 1000,
+        }
+    }
+}
+
 /// Compaction statistics
 #[derive(Debug, Clone, Default)]
 pub struct CompactionStats {
@@ -16,6 +31,7 @@ pub struct CompactionStats {
     pub documents_scanned: u64,
     pub documents_kept: u64,
     pub tombstones_removed: u64,
+    pub peak_memory_mb: u64,  // Peak memory usage during compaction
 }
 
 impl CompactionStats {
@@ -34,27 +50,56 @@ impl CompactionStats {
 
 impl StorageEngine {
     /// Storage compaction - removes tombstones and old document versions
-    /// Creates a new file with only current, non-deleted documents
+    /// Uses chunked processing to minimize memory usage
     pub fn compact(&mut self) -> Result<CompactionStats> {
+        self.compact_with_config(&CompactionConfig::default())
+    }
+
+    /// Storage compaction with custom configuration
+    pub fn compact_with_config(&mut self, config: &CompactionConfig) -> Result<CompactionStats> {
         let temp_path = format!("{}.compact", self.file_path);
         let mut stats = CompactionStats::default();
 
         // Get current file size
         stats.size_before = self.file.metadata()?.len();
 
-        // Track latest versions of each document by collection and ID
-        let mut all_docs: HashMap<String, HashMap<crate::document::DocumentId, Value>> = HashMap::new();
-
         // Clone collections to avoid borrow conflicts
         let collections_snapshot = self.collections.clone();
         let file_len = self.file_len()?;
 
-        // First pass: collect all latest document versions from ALL collections
-        for (coll_name, coll_meta) in &collections_snapshot {
-            let mut current_offset = coll_meta.data_offset;
-            let mut docs_by_id: HashMap<crate::document::DocumentId, Value> = HashMap::new();
+        // Create temporary new file
+        let mut new_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temp_path)?;
 
-            // Scan all documents in this collection
+        // Prepare new collections metadata
+        let mut new_collections = self.collections.clone();
+        for coll_meta in new_collections.values_mut() {
+            coll_meta.data_offset = super::DATA_START_OFFSET;
+            coll_meta.document_catalog.clear();
+            coll_meta.document_count = 0;
+        }
+
+        // Write placeholder metadata
+        new_file.seek(SeekFrom::Start(0))?;
+        Self::write_metadata(&mut new_file, &self.header, &new_collections)?;
+
+        // Write documents starting at DATA_START_OFFSET
+        new_file.seek(SeekFrom::Start(super::DATA_START_OFFSET))?;
+        let mut write_offset = super::DATA_START_OFFSET;
+
+        // Process each collection separately (collection-by-collection)
+        for (coll_name, coll_meta) in &collections_snapshot {
+            // Track latest version of each document in this collection using chunked processing
+            let mut docs_by_id: HashMap<crate::document::DocumentId, Value> = HashMap::new();
+            let mut current_offset = coll_meta.data_offset;
+            let mut chunk_count = 0;
+            let mut current_memory_mb = 0u64;
+
+            // Scan all documents in this collection with chunked processing
             while current_offset < file_len {
                 match self.read_data(current_offset) {
                     Ok(doc_bytes) => {
@@ -68,9 +113,30 @@ impl StorageEngine {
 
                             if doc_collection == coll_name {
                                 if let Some(id_value) = doc.get("_id") {
-                                    // Deserialize directly to DocumentId (no string conversion!)
+                                    // Deserialize directly to DocumentId
                                     if let Ok(doc_id) = serde_json::from_value::<crate::document::DocumentId>(id_value.clone()) {
+                                        // Estimate memory usage
+                                        current_memory_mb = (docs_by_id.len() * std::mem::size_of::<Value>()) as u64 / (1024 * 1024);
+                                        if current_memory_mb > stats.peak_memory_mb {
+                                            stats.peak_memory_mb = current_memory_mb;
+                                        }
+
                                         docs_by_id.insert(doc_id, doc);
+                                        chunk_count += 1;
+
+                                        // If chunk is full, flush non-tombstones to new file
+                                        if chunk_count >= config.chunk_size {
+                                            write_offset = self.flush_compaction_chunk(
+                                                &mut new_file,
+                                                &mut new_collections,
+                                                coll_name,
+                                                &mut docs_by_id,
+                                                write_offset,
+                                                &mut stats,
+                                            )?;
+                                            chunk_count = 0;
+                                            docs_by_id.clear();
+                                        }
                                     }
                                 }
                             }
@@ -82,70 +148,16 @@ impl StorageEngine {
                 }
             }
 
-            all_docs.insert(coll_name.clone(), docs_by_id);
-        }
-
-        // Second pass: Calculate final metadata size using iterative convergence
-        let mut new_collections = self.collections.clone();
-
-        // Calculate document counts for each collection
-        for (coll_name, docs_by_id) in &all_docs {
-            let doc_count = docs_by_id.iter()
-                .filter(|(_, doc)| !doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false))
-                .count() as u64;
-
-            if let Some(coll_meta) = new_collections.get_mut(coll_name) {
-                coll_meta.document_count = doc_count;
-            }
-        }
-
-        // Create temporary new file
-        let mut new_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temp_path)?;
-
-        // Use RESERVED SPACE architecture: metadata in first 256KB, documents after DATA_START_OFFSET
-        // This matches the normal storage layout and avoids complex offset calculations
-
-        // Write metadata first (placeholder with document_count but empty catalog)
-        for coll_meta in new_collections.values_mut() {
-            coll_meta.data_offset = super::DATA_START_OFFSET;
-            coll_meta.document_catalog.clear();
-        }
-
-        new_file.seek(SeekFrom::Start(0))?;
-        Self::write_metadata(&mut new_file, &self.header, &new_collections)?;
-
-        // Write documents starting at DATA_START_OFFSET and build document_catalog
-        new_file.seek(SeekFrom::Start(super::DATA_START_OFFSET))?;
-        let mut write_offset = super::DATA_START_OFFSET;
-
-        for (coll_name, docs_by_id) in &all_docs {
-            for (doc_id, doc) in docs_by_id {
-                // Skip tombstones (deleted documents)
-                if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    stats.tombstones_removed += 1;
-                    continue;
-                }
-
-                // Write document to new file
-                let doc_offset = write_offset;
-                let doc_bytes = serde_json::to_vec(&doc)?;
-                let len = doc_bytes.len() as u32;
-
-                new_file.write_all(&len.to_le_bytes())?;
-                new_file.write_all(&doc_bytes)?;
-
-                write_offset += 4 + doc_bytes.len() as u64;
-                stats.documents_kept += 1;
-
-                // Update document_catalog with actual offset (direct DocumentId insert!)
-                if let Some(coll_meta) = new_collections.get_mut(coll_name) {
-                    coll_meta.document_catalog.insert(doc_id.clone(), doc_offset);
-                }
+            // Flush remaining documents in the final chunk
+            if !docs_by_id.is_empty() {
+                write_offset = self.flush_compaction_chunk(
+                    &mut new_file,
+                    &mut new_collections,
+                    coll_name,
+                    &mut docs_by_id,
+                    write_offset,
+                    &mut stats,
+                )?;
             }
         }
 
@@ -164,7 +176,6 @@ impl StorageEngine {
 
         // Close old file and mmap
         drop(self.mmap.take());
-        // Don't close self.file yet - we'll replace it after rename
 
         // Replace old file with new file
         fs::rename(&temp_path, &self.file_path)?;
@@ -178,12 +189,50 @@ impl StorageEngine {
         // Reload metadata
         let (header, collections) = Self::load_metadata(&mut file)?;
 
-        // Update self (this closes the old file)
+        // Update self
         self.file = file;
         self.header = header;
         self.collections = collections;
         self.mmap = None; // Reset mmap
 
         Ok(stats)
+    }
+
+    /// Helper function to flush a chunk of documents to the compacted file
+    fn flush_compaction_chunk(
+        &self,
+        new_file: &mut std::fs::File,
+        new_collections: &mut HashMap<String, super::CollectionMeta>,
+        coll_name: &str,
+        docs_by_id: &mut HashMap<crate::document::DocumentId, Value>,
+        mut write_offset: u64,
+        stats: &mut CompactionStats,
+    ) -> Result<u64> {
+        for (doc_id, doc) in docs_by_id.iter() {
+            // Skip tombstones (deleted documents)
+            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                stats.tombstones_removed += 1;
+                continue;
+            }
+
+            // Write document to new file
+            let doc_offset = write_offset;
+            let doc_bytes = serde_json::to_vec(&doc)?;
+            let len = doc_bytes.len() as u32;
+
+            new_file.write_all(&len.to_le_bytes())?;
+            new_file.write_all(&doc_bytes)?;
+
+            write_offset += 4 + doc_bytes.len() as u64;
+            stats.documents_kept += 1;
+
+            // Update document_catalog and document_count
+            if let Some(coll_meta) = new_collections.get_mut(coll_name) {
+                coll_meta.document_catalog.insert(doc_id.clone(), doc_offset);
+                coll_meta.document_count += 1;
+            }
+        }
+
+        Ok(write_offset)
     }
 }
