@@ -70,6 +70,7 @@ impl IronBase {
             dict.set_item("documents_scanned", stats.documents_scanned)?;
             dict.set_item("documents_kept", stats.documents_kept)?;
             dict.set_item("tombstones_removed", stats.tombstones_removed)?;
+            dict.set_item("peak_memory_mb", stats.peak_memory_mb)?;
             dict.set_item("compression_ratio", stats.compression_ratio())?;
             Ok(dict.into())
         })

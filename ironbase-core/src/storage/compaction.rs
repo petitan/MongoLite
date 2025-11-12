@@ -97,8 +97,6 @@ impl StorageEngine {
             let mut docs_by_id: HashMap<crate::document::DocumentId, Value> = HashMap::new();
             let mut current_offset = coll_meta.data_offset;
             let mut chunk_count = 0;
-            let mut current_memory_mb = 0u64;
-
             // Scan all documents in this collection with chunked processing
             while current_offset < file_len {
                 match self.read_data(current_offset) {
@@ -115,8 +113,10 @@ impl StorageEngine {
                                 if let Some(id_value) = doc.get("_id") {
                                     // Deserialize directly to DocumentId
                                     if let Ok(doc_id) = serde_json::from_value::<crate::document::DocumentId>(id_value.clone()) {
-                                        // Estimate memory usage
-                                        current_memory_mb = (docs_by_id.len() * std::mem::size_of::<Value>()) as u64 / (1024 * 1024);
+                                        // Track memory usage (estimate: document size + HashMap overhead)
+                                        let doc_size_bytes = doc_bytes.len() as u64;
+                                        let current_memory_bytes = docs_by_id.len() as u64 * doc_size_bytes;
+                                        let current_memory_mb = current_memory_bytes / (1024 * 1024);
                                         if current_memory_mb > stats.peak_memory_mb {
                                             stats.peak_memory_mb = current_memory_mb;
                                         }
